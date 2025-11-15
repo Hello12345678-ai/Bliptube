@@ -1,0 +1,152 @@
+Abyssal-9
+Abyssal-9 is a deterministic, intentionally unreadable esoteric programming language designed to be astronomically difficult to analyze, reason about, or craft programs for by hand. This page is the canonical MediaWiki source: it defines canonical constants, decode rules, microtable derivation, staged verification, overlapping windows, CNF-schema constraints, witness checks, proof-of-work checks, and an extensive list of hardness amplifiers whose combined effect produces the requested astronomical difficulty multiplier. Implementations that follow this spec verbatim are interoperable and deterministic.
+
+Short description
+Abyssal-9 uses interleaved base-3 planes, large trit-words, program-prefix-derived microtables, staged verification checks, overlapping instruction windows (including multi-overlap and shadowing), opaque address mapping that depends on runtime tape state, and built-in combinatorial constraints (CNF schema fragments). These features make static analysis effectively infeasible without exact dynamic simulation of the program prefix and tape state.
+
+Intent and guarantees
+**Deterministic:** No secret keys, no non-deterministic runtime hidden state. Given identical program bytes and identical inputs, any correct implementation will produce the same output.
+**Non-self-modifying:** Program trits are read-only. All confusion arises from decode-time dependencies on global state and prefix-derived tables.
+**Turing-complete:** The language supports unbounded tape-like memory and conditional jumps; it can simulate BF or a Minsky machine.
+**Extreme hardness:** The specification contains many orthogonal amplifiers (word size, plane count, microtable combinatorics, CNF constraints, witness checks, proof-of-work requirements, etc.) whose product is intended to realize a very large hardness multiplier.
+Copy-paste header snippet
+Abyssal-9 — deterministic unreadable esolang using interleaved base-3 planes, prefix-derived microtables, staged verify passes, overlapping windows, and CNF schema constraints. See page for canonical constants and generator guidance.
+Canonical constants (authoritative, copy verbatim)
+Word trit-length (W): canonical baseline **23** (three choices available in the spec: 19/23/29 — 23 is canonical for high hardness).
+Trit planes (k): canonical baseline **5** (planes are interleaved in a nontrivial polynomial pattern).
+Prefix checksum window (H0): **4093** trits (or entire program if shorter).
+Microtable rows: **65537** (this is canonical; implementers may support alternate sizes for toy modes).
+Opcode space (N): **128** opcodes numbered `0..127`.
+Mixing function: **Mix128** (canonical 128-bit mixer described below).
+Address constants: `P1 = 0x9E3779B97F4A7C15` (folded into 128-bit ops), `P2 = 0xC2B2AE3D27D4EB4F`.
+Ease modes: `ease=0` = canonical maximum hardness (default), `ease=1..3` = progressively easier toy modes (documented later).
+Mix128 (canonical 128-bit mixer)
+<syntaxhighlight lang="python">
+
+Reference Mix128 (pseudocode). Implement exactly for portability.
+def mix64(v):
+
+   v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9
+   v = (v ^ (v >> 27)) * 0x94D049BB133111EB
+   v = v ^ (v >> 31)
+   return v & ((1<<64)-1)
+def Mix128(lo_in, hi_in):
+
+   a = mix64(lo_in ^ 0x243F6A8885A308D3)
+   b = mix64(hi_in ^ 0x13198A2E03707344)
+   # fold/pair deterministically
+   lo_out = (a ^ ((b << 1) & ((1<<64)-1))) & ((1<<64)-1)
+   hi_out = (b ^ ((a << 1) & ((1<<64)-1))) & ((1<<64)-1)
+   return lo_out, hi_out
+</syntaxhighlight>
+
+Program format and planes
+Program input is a single trit stream (`0`,`1`,`2`). The stream is understood to be an interleaving of `k` plane-strings. Interleaving/deinterleaving coefficients are deterministically derived from `prefix_checksum` (see below).
+After deinterleaving, each plane yields consecutive words of `W` trits; each word is a base-3 big-endian integer. Words do not cross planes.
+Implementations must recover planes by running the canonical `deinterleave()` using polynomial coefficients derived from the prefix checksum. Different ease modes adjust coefficients; canonical `ease=0` is maximum complexity.
+Prefix checksum and deinterleaver seed
+Compute `prefix_checksum = Mix128(trits_to_integer(first_H0_trits_low), trits_to_integer(first_H0_trits_high))`.
+Deinterleaver polynomial coefficients are derived from `prefix_checksum` and from a small deterministic table; implementers must compute them exactly as specified in the reference implementation (coeff generation: iterate Mix128 on `prefix_checksum ^ i` and parse coefficients).
+Microtable derivation (full-program dependent)
+Compute `micro_idx = (Mix128(prefix_checksum_low ^ G, prefix_checksum_high) mod microtable_rows)`.
+For row `r` in `0..microtable_rows-1`, `seed_lo, seed_hi = Mix128(prefix_checksum_low ^ r, prefix_checksum_high ^ r)`. Then iterate `Mix128(seed_lo + i, seed_hi + i)` to produce bytes parsed into:
+ - a 128-entry opcode permutation,
+ - an array of schema rows (each schema: arg_base, arg_mask, flags, CNF_template_index, witness_template_index),
+ - a 32-bit `step_bias` or `step_template` (depends on ease).
+Because microtables are derived from the program prefix, reconstructing them requires the generator/interpreter to have constructed/seen the same prefix — this enforces full-prefix dependency.
+Two-stage decode with witness verification
+Decoding a word at plane-word index `IP`: 1. Let `w = word(IP)` (after deinterleaving). 2. Compute `m = micro_idx(G, prefix_checksum)` and reconstruct `row = M[m]`. 3. Compute `seed = Mix128(w_parts_lo, w_parts_hi) ^ G_parts` and derive `opcode_candidate = (fold(seed) & 0x7F)` (7 bits). 4. Map `opcode = row.op_perm[opcode_candidate]`, and fetch `schema_candidate = row.schema[opcode_candidate]`. 5. Compute `arg_count = schema_candidate.arg_base + ((G >> (opcode_candidate % 8)) & 0xF)` (argument count depends on bits of `G`). 6. Stage-2: compute `witness = witness_function(schema_candidate.witness_template, recent_tape_window, G, IP, w)`; `witness_function` is a deterministic heavy transform (e.g., 2x2 matrix power followed by modular-root extraction and a polynomial fold). The exact template is taken from the microtable row. 7. Evaluate `verify_predicate(witness, row.witness_template)` (a deterministic boolean predicate). If `True`, the schema_candidate is authoritative; if `False`, fallback mapping is used (row specifies deterministic fallback indices) and stage-2 repeats until an authoritative schema is found (the number of fallbacks is bounded and encoded in the row). 8. The authoritative schema tells whether the instruction will also read `overlap_m` additional words (overlap multiplicity) ahead/behind, and whether schema CNF bits must be satisfied.
+
+CNF schema fragments and SAT constraints
+Some schema rows include a short CNF formula (clauses up to length 11; number of clauses varies per row). The CNF's input bits are derived deterministically from:
+ - low-order bits of recent `TAPE` entries in a sliding window,
+ - low-order bits of `G`,
+ - low-order bits of last `k` words,
+ - bits derived from `witness`.
+The CNF must evaluate to `True` for the schema to be usable. This forces generators to satisfy many combinatorial constraints across the entire program when constructing nontrivial programs, creating an effective SAT-like global constraint problem.
+Overlap, shadowing, and multi-overlap windows
+If `schema.flags` contains `OVERLAP_MULTIPLICITY = r`, the instruction will read the primary `arg_count` words plus `r` additional words drawn from offsets that may overlap with other instruction windows. Overlapped words are not consumed; they remain available to later decoders. The overlap offsets are deterministic functions of `(G, w, schema_template)`.
+Implicit arguments, backrefs, and tape-dependent decoding
+`arg_types_mask` defines per-argument whether the argument is:
+ - `LITERAL` (the raw word),
+ - `RELATIVE_ADDR` (a word interpreted as an address literal),
+ - `IMPLICIT_TAPE_FETCH` (value obtained at runtime from `TAPE[addr_map(...)]`),
+ - `IMPLICIT_BACKREF` (value fetched from `TAPE[addr_map(word(IP-delta),...)]`).
+Using backrefs makes decoding at `IP` require knowledge of tape writes that may have occurred earlier — forcing generator/interpreter simulation.
+Address mapping (128-bit folded)
+<syntaxhighlight lang="python">
+
+pseudocode reference (canonical)
+def addr_map_128(a_bigint, G_lo, G_hi, plane, IP, prefix_checksum_lo, prefix_checksum_hi):
+
+   # fold a_bigint into two 64-bit halves (lo,hi)
+   a_lo = a_bigint & ((1<<64)-1)
+   a_hi = (a_bigint >> 64) & ((1<<64)-1)
+   lo, hi = Mix128(a_lo ^ prefix_checksum_lo, a_hi ^ prefix_checksum_hi)
+   mapped_lo = ( (lo * 0x9E3779B97F4A7C15) + 0xC2B2AE3D27D4EB4F ) ^ (hi ^ G_lo)
+   mapped_hi = ( (hi * 0xC2B2AE3D27D4EB4F) + 0x9E3779B97F4A7C15 ) ^ (lo ^ G_hi)
+   return (mapped_hi << 64) | mapped_lo   # arbitrary-precision tape key
+</syntaxhighlight>
+
+Implementations use the returned arbitrary-precision integer as the tape key. Because mapping uses prefix checksum and G, identical literal values may map to different tape cells across different runtime contexts.
+IP update (canonical)
+<syntaxhighlight lang="python">
+
+After instruction executes and computes last_result (128-bit pair)
+x_lo, x_hi = Mix128(G_lo ^ last_result_lo, prefix_checksum_hi ^ last_result_hi) step_mix = ((x_lo * 0x5851F42D4C957F2D + x_hi) >> 61) & 0xFFFFFFFF IP = (IP + 1 + row.step_bias + step_mix) % plane_word_count </syntaxhighlight>
+
+Opcode set (high level)
+There are 128 opcode slots. Representative semantics (implementers map numbers to these operations via the microtable):
+
+NOP, PUSH_LITERAL, POP
+ADD, SUB, MUL, DIVMOD, MODPOW
+MATRIX_PUSH, MATRIX_MUL, MATRIX_EXP, MATRIX_VECTOR
+CF_PUSH, CF_EVAL (continued fraction tools)
+POLY_COMPOSE, POLY_EVAL
+PRIME_CHECK (Miller-Rabin rounds from G)
+LOAD, STORE (via addr_map_128)
+JMP, JZ, JNZ, CALL, RET
+IO_READ, IO_WRITE
+HASH_PUSH (Mix128 fold)
+ROT_TRITS, PERMUTE_BITS, BITOP
+SAT_ASSIST (generate candidate witness bits)
+PROOF_OF_WORK_VERIFY (verify cheap-to-verify deterministic PoW)
+BLOCK_COPY, ROTATE_TAPE, COPY_WITH_TRANSFORM
+And many heavy numeric micro-variants (128 slots total)
+Proof-of-work and witness templates
+Some microtable rows include `witness_template` and `pow_template`. The stage-2 witness computation produces a candidate value; `verify_predicate` will check a deterministic PoW-style small puzzle (e.g., requiring the witness combined with small context has a Mix128 hash with trailing N zero bits). These PoW puzzles are cheap to verify but deliberately expensive to find under canonical difficulty parameters, adding to generator cost.
+Generator strategy (canonical, deterministic)
+Producing a valid nontrivial program (e.g., printing text) requires a deterministic generator that: 1. Maintains the full interpreter state (`G`, `TAPE`, `STACK`, `prefix_trits`). 2. To emit a semantic operation S under current state, reconstruct microtable row and search deterministically for a `w` in `0..3^W-1` (words in the plane) such that decoding `w` under current G yields `opcode == S` and all stage-2 checks (witness/CNF/PoW) can be satisfied by appending suitable following words. Because W=23 (canonical), naive search is ~9.4 billion candidates per word; canonical generator uses:
+
+  * guided seeded search using Mix128 seeds,
+  * per-row cached inverse maps for frequently used microtable rows,
+  * SAT-assisted local search to find CNF-satisfying windows,
+  * backtracking across prefixes when global CNF constraints fail,
+  * optionally distributed generation (deterministic sharding) for extremely heavy programs.
+3. After selecting `w` and any associated literal words, the generator simulates execution of those instructions to update `G`, `TAPE`, and `prefix_trits` before continuing. 4. The generator is deterministic (no randomness except in allowed ease modes) so reproduced runs produce identical programs.
+
+Hardness amplifiers (explicit, extended list)
+This section enumerates concrete amplifiers that multiply the cost of analysis/construction. Use all of them in canonical `ease=0` to achieve the requested astronomical hardness. Where parameters are numeric, the canonical value is listed first; implementers may increase them to raise hardness.
+
+1. **W = 23 (or 29 for extreme)** — exponential per-word increase. 2. **k = 5 planes** — deinterleaver algebra gets harder; coefficients derived from large prefix window. 3. **microtable_rows = 65537** — microtable space expansion increases per-row complexity. 4. **prefix window H0 = 4093** — long prefix required to derive full microtable landscape. 5. **CNF schema length** — average 47 clauses per row; clause lengths up to 11. 6. **overlap multiplicity r = 1..7** — allow each instruction to read multiple overlapped words ahead/behind. 7. **implicit backrefs depth = up to 13** — instructions may depend on tape values computed many instructions earlier. 8. **witness cost** — witness computations involve costly transforms (matrix-power with exponent up to 2^20 in canonical mode folded with modular roots); the evaluation is deterministic but computationally heavy for generators. 9. **PoW difficulty** — canonical trailing-zero bits = 20 (tunable). Finding preimages at generator-time is intentionally costly. 10. **dense micro-variants** — many opcode slots are functionally distinct micro-variants requiring different schema shapes (increases search branching). 11. **avalanche mixing** — Mix128 used in many places for maximum avalanche; tiny changes in G change decode drastically. 12. **global SAT coupling** — CNFs in different microtable rows reference overlapping tape bit windows, producing a global SAT problem across program prefixes. 13. **overlapping plane polynomial solves** — deinterleaver coefficients require solving small polynomial systems derived from prefix checksum; this is expensive for naive regenerators. 14. **prefix chaining** — microtable rows derive secondary seeds that chain to deeper tables; reconstructing deeper layers requires simulating many earlier rows producing a chained complexity. 15. **generator-friendly traps disabled** — there are no "easier" canonical opcode encodings that always map to benign opcodes across G values; generator must search per-state.
+
+Ease modes and toy section (optional)
+If you want experimentation, add a toy section on the wiki with `ease=2` or `ease=3`:
+
+ease=3: W=11, k=1, microtable_rows=17, H0=61 — trivial to generate and useful for demos.
+ease=2: W=15, k=2, microtable_rows=257, H0=257 — medium difficulty.
+ease=1: W=19, k=3, microtable_rows=1024, H0=1024 — small step toward canonical.
+Default `ease=0` is the canonical maximum-hardness spec above.
+
+Example: why Abyssal-9 is harder than Malbolge (concrete metrics)
+Per-word search space: Malbolge uses small local search; canonical Abyssal-9 uses W=23 (≈9.4e9 candidates per word) and many microtable rows — orders of magnitude larger.
+Prefix dependency depth: Malbolge's decode is local/self-modifying; Abyssal-9 requires reconstructing microtables from a long prefix H0=4093 and satisfying CNFs and witness templates — decoding later words requires simulating thousands of earlier words.
+Global combinatorics: CNF-schema constraints couple different parts of a program into a SAT problem; Malbolge does not provide this kind of global SAT coupling.
+Deterministic PoW: adds computational asymmetry (easy verify, expensive generate).
+Avalanche mixing: Mix128 produces high sensitivity to minor state changes, making craftability by hand effectively impossible.
+Together these metrics produce an objective algorithmic hardness increase vs Malbolge.
+
+Reference implementation note (publish together)
+Publish a reference interpreter and deterministic generator as canonical artefacts. The interpreter must implement Mix128, deinterleaver, microtable reconstruction, staged decode, witness checks, CNF evaluation, addr_map_128, and the opcode semantics exactly as described. The generator must be deterministic and document search heuristics (it may be slow by design).
+
+also comments are [this is a comment]
